@@ -2,7 +2,6 @@ import contextlib
 import json
 import multiprocessing
 import os
-import subprocess
 from collections import defaultdict
 from pathlib import Path
 from typing import List, Iterator, Optional, Iterable, Dict
@@ -181,20 +180,40 @@ def create_downloader() -> Iterable[MetricDownloader]:
         yield MetricDownloader(pool)
 
 
-def get_last_n_shas(n: int) -> List[str]:
-    stdout = subprocess.run(["git", "--no-pager", "log", "--format=%H", "-n", str(n), "--grep", "Auto merge"],
-                            cwd=str(PATH_TO_RUSTC),
-                            stdout=subprocess.PIPE).stdout.decode()
-    return list(stdout.splitlines(keepends=False))
+def get_shas_from_last_n_days(days: int) -> List[str]:
+    """
+    Return rust-lang/rust merge commit SHAs for the last `days` days.
+    """
+    from git import Repo
+
+    def iterate_merge_commits():
+        repo = Repo(PATH_TO_RUSTC)
+        commit = repo.heads.master.commit
+        while True:
+            if commit.message.startswith("Auto merge"):
+                yield commit
+            for parent in commit.parents:
+                if parent.message.startswith("Auto merge") and commit.binsha != parent.binsha:
+                    commit = parent
+                    break
+
+    commit_iter = iterate_merge_commits()
+    commits = [next(commit_iter)]
+    while len(commits) < days:
+        commit = next(commit_iter)
+        commit_date = commit.committed_datetime
+        previous_date = commits[-1].committed_datetime
+        if commit_date.date() != previous_date.date():
+            commits.append(commit)
+    return [commit.hexsha for commit in commits]
 
 
 if __name__ == "__main__":
-    last_n = 100
-
     data = defaultdict(list)
+    shas = get_shas_from_last_n_days(30)
 
     with create_downloader() as downloader:
-        for commit in tqdm.tqdm(get_last_n_shas(last_n)):
+        for commit in tqdm.tqdm(shas):
             response = downloader.get_metrics_for_sha(commit, CI_JOBS)
             for (job, metrics) in response.items():
                 metrics: BuildStep = metrics
