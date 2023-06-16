@@ -1,4 +1,5 @@
 import contextlib
+import dataclasses
 import json
 import multiprocessing
 import os
@@ -120,38 +121,38 @@ class BuildStep:
 STAGE_REGEX = re.compile(r".*stage: (\d).*")
 
 
-def load_metrics(metrics) -> BuildStep:
-    assert len(metrics["invocations"])
-    invocation = metrics["invocations"][-1]
+def load_metrics(metrics) -> List[BuildStep]:
+    def parse_invocation(invocation) -> BuildStep:
+        def parse(entry) -> Optional[BuildStep]:
+            if "kind" not in entry or entry["kind"] != "rustbuild_step":
+                return None
+            type = entry.get("type", "")
+            duration_excluding_children = entry.get("duration_excluding_children_sec", 0)
+            duration = duration_excluding_children
+            children = []
 
-    def parse(entry) -> Optional[BuildStep]:
-        if "kind" not in entry or entry["kind"] != "rustbuild_step":
-            return None
-        type = entry.get("type", "")
-        duration_excluding_children = entry.get("duration_excluding_children_sec", 0)
-        duration = duration_excluding_children
-        children = []
+            stage = STAGE_REGEX.match(entry.get("debug_repr", ""))
+            if stage is not None:
+                stage = int(stage.group(1))
 
-        stage = STAGE_REGEX.match(entry.get("debug_repr", ""))
-        if stage is not None:
-            stage = int(stage.group(1))
+            for child in entry.get("children", ()):
+                step = parse(child)
+                if step is not None:
+                    children.append(step)
+                    duration += step.duration
+            return BuildStep(type=type, children=children, duration=duration,
+                             duration_excluding_children=duration_excluding_children, stage=stage)
 
-        for child in entry.get("children", ()):
-            step = parse(child)
-            if step is not None:
-                children.append(step)
-                duration += step.duration
-        return BuildStep(type=type, children=children, duration=duration,
-                         duration_excluding_children=duration_excluding_children, stage=stage)
+        children = [parse(child) for child in invocation.get("children", ())]
+        total_duration = invocation.get("duration_including_children_sec", 0)
+        return BuildStep(
+            type="root",
+            children=children,
+            duration=total_duration,
+            duration_excluding_children=total_duration - sum(c.duration for c in children)
+        )
 
-    children = [parse(child) for child in invocation.get("children", ())]
-    total_duration = invocation.get("duration_including_children_sec", 0)
-    return BuildStep(
-        type="root",
-        children=children,
-        duration=total_duration,
-        duration_excluding_children=total_duration - sum(c.duration for c in children)
-    )
+    return [parse_invocation(invocation) for invocation in metrics["invocations"]]
 
 
 def download_metrics(sha: str, job: str):
@@ -161,14 +162,14 @@ def download_metrics(sha: str, job: str):
     return response.json()
 
 
-def get_metrics(sha: str, job: str) -> Optional[BuildStep]:
+def get_metrics(sha: str, job: str) -> List[BuildStep]:
     cache_dir = CACHE_DIR / sha
     cache_dir.mkdir(parents=True, exist_ok=True)
     metric_path = cache_dir / f"{job}.json"
     if metric_path.is_file():
         # Missing metrics
         if os.stat(metric_path).st_size == 0:
-            return None
+            return []
         with open(metric_path) as f:
             data = json.load(f)
     else:
@@ -179,7 +180,7 @@ def get_metrics(sha: str, job: str) -> Optional[BuildStep]:
                 # Create empty file
                 pass
             print(e)
-            return None
+            return []
         with open(metric_path, "w") as f:
             json.dump(data, f)
     return load_metrics(data)
@@ -254,6 +255,40 @@ def calculate_test_duration(step: BuildStep) -> (float, float):
     return (run_duration, step.duration - run_duration)
 
 
+@dataclasses.dataclass
+class InvocationResult:
+    llvm: float
+    rustc_stage_1: float
+    rustc_stage_2: float
+    test_run: float
+    test_build: float
+    total: float
+
+
+def aggregate_step(metrics: BuildStep) -> InvocationResult:
+    llvm = metrics.duration_by_filter(lambda step: step.type == "bootstrap::llvm::Llvm")
+    rustc_stage_1 = metrics.duration_by_filter(
+        lambda step: step.type == "bootstrap::compile::Rustc" and step.stage == 0)
+    rustc_stage_2 = metrics.duration_by_filter(
+        lambda step: step.type == "bootstrap::compile::Rustc" and step.stage == 1)
+    test_steps = list(metrics.find_all_by_filter(lambda step: step.type.startswith("bootstrap::test::")))
+    test_durations = [calculate_test_duration(step) for step in test_steps]
+    test_run = sum(t[0] for t in test_durations)
+    test_build = sum(t[1] for t in test_durations)
+    test_total = sum(s.duration for s in test_steps)
+
+    assert test_run + test_build <= test_total + 10
+
+    return InvocationResult(
+        llvm=llvm,
+        rustc_stage_1=rustc_stage_1,
+        rustc_stage_2=rustc_stage_2,
+        test_run=test_run,
+        test_build=test_build,
+        total=metrics.duration
+    )
+
+
 if __name__ == "__main__":
     data = defaultdict(list)
     shas = get_shas_from_last_n_days(30)
@@ -262,27 +297,16 @@ if __name__ == "__main__":
         for commit in tqdm.tqdm(shas):
             response = downloader.get_metrics_for_sha(commit, CI_JOBS)
             for (job, metrics) in response.items():
-                metrics: BuildStep = metrics
-                llvm = metrics.duration_by_filter(lambda step: step.type == "bootstrap::llvm::Llvm")
-                rustc_stage_1 = metrics.duration_by_filter(
-                    lambda step: step.type == "bootstrap::compile::Rustc" and step.stage == 0)
-                rustc_stage_2 = metrics.duration_by_filter(
-                    lambda step: step.type == "bootstrap::compile::Rustc" and step.stage == 1)
-                test_steps = list(metrics.find_all_by_filter(lambda step: step.type.startswith("bootstrap::test::")))
-                test_durations = [calculate_test_duration(step) for step in test_steps]
-                test_run = sum(t[0] for t in test_durations)
-                test_build = sum(t[1] for t in test_durations)
-                test_total = sum(s.duration for s in test_steps)
+                metrics: List[BuildStep] = metrics
+                if len(metrics) > 0:
+                    results = [aggregate_step(step) for step in metrics]
 
-                assert test_run + test_build <= test_total + 10
-
-                total = metrics.duration
-                data["job"].append(job)
-                data["llvm"].append(llvm)
-                data["rustc-1"].append(rustc_stage_1)
-                data["rustc-2"].append(rustc_stage_2)
-                data["test-run"].append(test_run)
-                data["test-build"].append(test_build)
-                data["total"].append(total)
+                    data["job"].append(job)
+                    data["llvm"].append(sum(r.llvm for r in results))
+                    data["rustc-1"].append(sum(r.rustc_stage_1 for r in results))
+                    data["rustc-2"].append(sum(r.rustc_stage_2 for r in results))
+                    data["test-run"].append(sum(r.test_run for r in results))
+                    data["test-build"].append(sum(r.test_build for r in results))
+                    data["total"].append(sum(r.total for r in results))
     df = pd.DataFrame(data)
     df.to_csv("result.csv", index=False)

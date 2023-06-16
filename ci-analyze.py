@@ -9,6 +9,7 @@ df = df[df["job"].isin((
     "x86_64-msvc-1", "x86_64-msvc-2",
     "i686-msvc-1", "i686-msvc-2",
     "x86_64-apple-1", "x86_64-apple-2",
+    # "dist-x86_64-linux"
 ))]
 df = df.drop(columns=["total"])
 
