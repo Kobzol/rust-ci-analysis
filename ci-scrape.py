@@ -6,7 +6,7 @@ import os
 import re
 from collections import defaultdict
 from pathlib import Path
-from typing import List, Iterator, Optional, Iterable, Dict, Callable, Tuple
+from typing import List, Iterator, Optional, Iterable, Dict, Callable, Tuple, Union
 
 import pandas as pd
 import requests
@@ -88,15 +88,29 @@ PATH_TO_RUSTC = CURRENT_DIR.parent
 
 app = typer.Typer()
 
+Job = str
+
+
+@dataclasses.dataclass(frozen=True)
+class Test:
+    name: str
+    outcome: str
+
+
+@dataclasses.dataclass(frozen=True)
+class TestSuite:
+    tests: List[Test]
+
 
 class BuildStep:
     def __init__(self, type: str, children: List["BuildStep"], duration: float, duration_excluding_children: float,
-                 stage: Optional[int] = None):
+                 stage: Optional[int] = None, tests: Optional[List[Test]] = None):
         self.type = type
         self.children = children
         self.duration = duration
         self.duration_excluding_children = duration_excluding_children
         self.stage = stage
+        self.tests = tests
 
     def find_all_by_filter(self, filter: Callable[["BuildStep"], bool]) -> Iterator["BuildStep"]:
         if filter(self):
@@ -112,10 +126,17 @@ class BuildStep:
     def is_leaf(self) -> bool:
         return len(self.children) == 0
 
-    def iterate_all_children(self):
+    def iterate_all_children(self) -> Iterable["BuildStep"]:
         for child in self.children:
             yield child
             yield from child.iterate_all_children()
+
+    def iterate_all_tests(self) -> Iterable[Test]:
+        if self.tests is not None:
+            for test in self.tests:
+                yield test
+        for child in self.children:
+            yield from child.iterate_all_tests()
 
     def __repr__(self):
         return f"BuildStep(type={self.type}, duration={self.duration}, children={len(self.children)})"
@@ -124,27 +145,46 @@ class BuildStep:
 STAGE_REGEX = re.compile(r".*stage: (\d).*")
 
 
-def load_metrics(metrics) -> List[BuildStep]:
+def load_metrics(metrics, parse_tests: bool = False) -> List[BuildStep]:
     def parse_invocation(invocation) -> BuildStep:
-        def parse(entry) -> Optional[BuildStep]:
-            if "kind" not in entry or entry["kind"] != "rustbuild_step":
+        def parse(entry) -> Optional[Union[BuildStep, TestSuite]]:
+            def normalize_test_name(name: str) -> str:
+                return name.replace("\\", "/")
+
+            if "kind" not in entry:
                 return None
-            type = entry.get("type", "")
-            duration_excluding_children = entry.get("duration_excluding_children_sec", 0)
-            duration = duration_excluding_children
-            children = []
+            elif parse_tests and entry["kind"] == "test_suite":
+                tests = entry["tests"]
+                tests = [Test(name=normalize_test_name(t["name"]), outcome=t["outcome"]) for t in tests]
+                return TestSuite(tests=tests)
+            elif parse_tests and entry["kind"] == "test":
+                tests = [Test(name=normalize_test_name(entry["name"]), outcome=entry["outcome"])]
+                return TestSuite(tests=tests)
+            elif entry["kind"] == "rustbuild_step":
+                type = entry.get("type", "")
+                duration_excluding_children = entry.get("duration_excluding_children_sec", 0)
+                duration = duration_excluding_children
+                children = []
+                tests = []
 
-            stage = STAGE_REGEX.match(entry.get("debug_repr", ""))
-            if stage is not None:
-                stage = int(stage.group(1))
+                stage = STAGE_REGEX.match(entry.get("debug_repr", ""))
+                if stage is not None:
+                    stage = int(stage.group(1))
 
-            for child in entry.get("children", ()):
-                step = parse(child)
-                if step is not None:
-                    children.append(step)
-                    duration += step.duration
-            return BuildStep(type=type, children=children, duration=duration,
-                             duration_excluding_children=duration_excluding_children, stage=stage)
+                for child in entry.get("children", ()):
+                    step = parse(child)
+                    if step is not None:
+                        if isinstance(step, TestSuite):
+                            tests.extend(step.tests)
+                        elif isinstance(step, BuildStep):
+                            children.append(step)
+                            duration += step.duration
+                        else:
+                            assert False
+                return BuildStep(type=type, children=children, duration=duration,
+                                 duration_excluding_children=duration_excluding_children, stage=stage,
+                                 tests=tests)
+            return None
 
         children = [parse(child) for child in invocation.get("children", ())]
         total_duration = invocation.get("duration_including_children_sec", 0)
@@ -165,7 +205,7 @@ def download_metrics(sha: str, job: str):
     return response.json()
 
 
-def get_metrics(sha: str, job: str) -> List[BuildStep]:
+def get_metrics(sha: str, job: str, parse_tests: bool) -> List[BuildStep]:
     cache_dir = CACHE_DIR / sha
     cache_dir.mkdir(parents=True, exist_ok=True)
     metric_path = cache_dir / f"{job}.json"
@@ -186,16 +226,16 @@ def get_metrics(sha: str, job: str) -> List[BuildStep]:
             return []
         with open(metric_path, "w") as f:
             json.dump(data, f)
-    return load_metrics(data)
+    return load_metrics(data, parse_tests=parse_tests)
 
 
 class MetricDownloader:
     def __init__(self, pool: multiprocessing.Pool):
         self.pool = pool
 
-    def get_metrics_for_sha(self, sha: str, jobs: Iterable[str]) -> Dict[str, BuildStep]:
+    def get_metrics_for_sha(self, sha: str, jobs: Iterable[str], parse_tests: bool) -> Dict[str, BuildStep]:
         result = {}
-        for (job, metric) in zip(jobs, self.pool.starmap(get_metrics, list((sha, job) for job in jobs))):
+        for (job, metric) in zip(jobs, self.pool.starmap(get_metrics, list((sha, job, parse_tests) for job in jobs))):
             if metric is not None:
                 result[job] = metric
         return result
@@ -302,11 +342,15 @@ def aggregate_step(metrics: BuildStep) -> InvocationResult:
 
 @app.command()
 def download_ci_durations(days: int = 30, output: Path = "result.csv"):
+    """
+    Downloads the metrics.json files from the last `days` of master merge commits.
+    Analyzes the metrics and stores durations of interesting bootstrap steps into `output`.
+    """
     shas = get_shas_from_last_n_days(days)
     items: List[Tuple[str, List[InvocationResult]]] = []
     with create_downloader() as downloader:
         for commit in tqdm.tqdm(shas):
-            response = downloader.get_metrics_for_sha(commit, CI_JOBS)
+            response = downloader.get_metrics_for_sha(commit, CI_JOBS, parse_tests=False)
             for (job, metrics) in response.items():
                 metrics: List[BuildStep] = metrics
                 if len(metrics) > 0:
@@ -340,6 +384,60 @@ def download_ci_durations(days: int = 30, output: Path = "result.csv"):
 
     df = pd.DataFrame(data)
     df.to_csv(output, index=False)
+
+
+def get_tests(commit: str) -> List[Tuple[Job, Test]]:
+    tests = []
+    with create_downloader() as downloader:
+        response = downloader.get_metrics_for_sha(commit, CI_JOBS, parse_tests=True)
+        for (job, metrics) in response.items():
+            metrics: List[BuildStep] = metrics
+            for step in metrics:
+                for test in step.iterate_all_tests():
+                    tests.append((job, test))
+    return tests
+
+
+@app.command()
+def analyze_tests(commit: Optional[str] = None):
+    """
+    Analyzes tests for the given `commit`.
+    Prints results to output.
+    """
+    if commit is None:
+        commit = get_shas_from_last_n_days(1)[0]
+    tests = get_tests(commit)
+
+    # Test to count
+    test_to_count = defaultdict(int)
+    for (job, test) in tests:
+        if test.outcome == "passed":
+            test_to_count[test.name] += 1
+    items = list(test_to_count.items())
+    most_tested = sorted(items, key=lambda item: item[1], reverse=True)
+
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+    values = [v[1] for v in most_tested]
+    sns.histplot(values)
+    plt.savefig("test-histogram.png")
+
+    print("5 most and least executed tests")
+    for (test, count) in most_tested[:5]:
+        print(f"{test}: {count}x")
+    for (test, count) in most_tested[-5:]:
+        print(f"{test}: {count}x")
+    print()
+
+    # Job to outcome count
+    print("Job to test count")
+    job_to_outcome = defaultdict(lambda: defaultdict(int))
+    for (job, test) in tests:
+        job_to_outcome[job][test.outcome] += 1
+    for (job, outcomes) in sorted(job_to_outcome.items(), key=lambda item: item[0]):
+        passed = outcomes.get("passed", 0)
+        ignored = outcomes.get("ignored", 0)
+        print(f"{job}: passed={passed}, ignored={ignored}")
 
 
 if __name__ == "__main__":
