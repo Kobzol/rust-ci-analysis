@@ -86,10 +86,12 @@ PATH_TO_RUSTC = CURRENT_DIR.parent
 
 
 class BuildStep:
-    def __init__(self, type: str, children: List["BuildStep"], duration: float, stage: Optional[int] = None):
+    def __init__(self, type: str, children: List["BuildStep"], duration: float, duration_excluding_children: float,
+                 stage: Optional[int] = None):
         self.type = type
         self.children = children
         self.duration = duration
+        self.duration_excluding_children = duration_excluding_children
         self.stage = stage
 
     def find_all_by_filter(self, filter: Callable[["BuildStep"], bool]) -> Iterator["BuildStep"]:
@@ -102,6 +104,14 @@ class BuildStep:
     def duration_by_filter(self, filter: Callable[["BuildStep"], bool]) -> float:
         children = tuple(self.find_all_by_filter(filter))
         return sum(step.duration for step in children)
+
+    def is_leaf(self) -> bool:
+        return len(self.children) == 0
+
+    def iterate_all_children(self):
+        for child in self.children:
+            yield child
+            yield from child.iterate_all_children()
 
     def __repr__(self):
         return f"BuildStep(type={self.type}, duration={self.duration}, children={len(self.children)})"
@@ -118,7 +128,8 @@ def load_metrics(metrics) -> BuildStep:
         if "kind" not in entry or entry["kind"] != "rustbuild_step":
             return None
         type = entry.get("type", "")
-        duration = entry.get("duration_excluding_children_sec", 0)
+        duration_excluding_children = entry.get("duration_excluding_children_sec", 0)
+        duration = duration_excluding_children
         children = []
 
         stage = STAGE_REGEX.match(entry.get("debug_repr", ""))
@@ -130,13 +141,16 @@ def load_metrics(metrics) -> BuildStep:
             if step is not None:
                 children.append(step)
                 duration += step.duration
-        return BuildStep(type=type, children=children, duration=duration, stage=stage)
+        return BuildStep(type=type, children=children, duration=duration,
+                         duration_excluding_children=duration_excluding_children, stage=stage)
 
     children = [parse(child) for child in invocation.get("children", ())]
+    total_duration = invocation.get("duration_including_children_sec", 0)
     return BuildStep(
         type="root",
         children=children,
-        duration=invocation.get("duration_including_children_sec", 0)
+        duration=total_duration,
+        duration_excluding_children=total_duration - sum(c.duration for c in children)
     )
 
 
@@ -217,6 +231,29 @@ def get_shas_from_last_n_days(days: int) -> List[str]:
     return [commit.hexsha for commit in commits]
 
 
+def calculate_test_duration(step: BuildStep) -> (float, float):
+    """
+    Returns (test run duration, test build duration)
+    """
+    run_duration = step.duration
+
+    def iterate(step):
+        nonlocal run_duration
+
+        for child in step.children:
+            # if child.type == "bootstrap::test::Compiletest":
+            #     run_duration -= child.duration_excluding_children
+            if "ToolBuild" in child.type or "TestHelpers" in child.type or "Std" in child.type:
+                run_duration -= child.duration
+            else:
+                for c in child.iterate_all_children():
+                    iterate(c)
+
+    iterate(step)
+
+    return (run_duration, step.duration - run_duration)
+
+
 if __name__ == "__main__":
     data = defaultdict(list)
     shas = get_shas_from_last_n_days(30)
@@ -227,15 +264,25 @@ if __name__ == "__main__":
             for (job, metrics) in response.items():
                 metrics: BuildStep = metrics
                 llvm = metrics.duration_by_filter(lambda step: step.type == "bootstrap::llvm::Llvm")
-                rustc_stage_1 = metrics.duration_by_filter(lambda step: step.type == "bootstrap::compile::Rustc" and step.stage == 0)
-                rustc_stage_2 = metrics.duration_by_filter(lambda step: step.type == "bootstrap::compile::Rustc" and step.stage == 1)
-                tests = metrics.duration_by_filter(lambda step: step.type.startswith("bootstrap::test::"))
+                rustc_stage_1 = metrics.duration_by_filter(
+                    lambda step: step.type == "bootstrap::compile::Rustc" and step.stage == 0)
+                rustc_stage_2 = metrics.duration_by_filter(
+                    lambda step: step.type == "bootstrap::compile::Rustc" and step.stage == 1)
+                test_steps = list(metrics.find_all_by_filter(lambda step: step.type.startswith("bootstrap::test::")))
+                test_durations = [calculate_test_duration(step) for step in test_steps]
+                test_run = sum(t[0] for t in test_durations)
+                test_build = sum(t[1] for t in test_durations)
+                test_total = sum(s.duration for s in test_steps)
+
+                assert test_run + test_build <= test_total + 10
+
                 total = metrics.duration
                 data["job"].append(job)
                 data["llvm"].append(llvm)
                 data["rustc-1"].append(rustc_stage_1)
                 data["rustc-2"].append(rustc_stage_2)
-                data["tests"].append(tests)
+                data["test-run"].append(test_run)
+                data["test-build"].append(test_build)
                 data["total"].append(total)
     df = pd.DataFrame(data)
     df.to_csv("result.csv", index=False)

@@ -10,11 +10,13 @@ df = df[df["job"].isin((
     "i686-msvc-1", "i686-msvc-2",
     "x86_64-apple-1", "x86_64-apple-2",
 ))]
+df = df.drop(columns=["total"])
 
 
 def fn(data, **kwargs):
     data = pd.melt(data, id_vars=["job"], var_name="section")
-    sns.barplot(data=data, x="section", y="value")
+    g = sns.barplot(data=data, x="section", y="value")
+    g.set_xticklabels(g.get_xticklabels(), rotation=45)
 
 
 grid = sns.FacetGrid(df, col="job", col_wrap=4, sharey=True)
