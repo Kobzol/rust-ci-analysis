@@ -6,11 +6,12 @@ import os
 import re
 from collections import defaultdict
 from pathlib import Path
-from typing import List, Iterator, Optional, Iterable, Dict, Callable
+from typing import List, Iterator, Optional, Iterable, Dict, Callable, Tuple
 
 import pandas as pd
 import requests
 import tqdm
+import typer
 
 CI_JOBS = (
     "aarch64-gnu",
@@ -84,6 +85,8 @@ CI_JOBS = (
 CURRENT_DIR = Path(__file__).absolute().parent
 CACHE_DIR = CURRENT_DIR / ".cache"
 PATH_TO_RUSTC = CURRENT_DIR.parent
+
+app = typer.Typer()
 
 
 class BuildStep:
@@ -262,6 +265,7 @@ class InvocationResult:
     rustc_stage_2: float
     test_run: float
     test_build: float
+    suites: Dict[str, float]
     total: float
 
 
@@ -279,20 +283,27 @@ def aggregate_step(metrics: BuildStep) -> InvocationResult:
 
     assert test_run + test_build <= test_total + 10
 
+    suites = {}
+    for test_step in test_steps:
+        suite_name = test_step.type[len("bootstrap::test::"):]
+        if test_step.duration > 10:
+            suites[suite_name] = calculate_test_duration(test_step)[0]
+
     return InvocationResult(
         llvm=llvm,
         rustc_stage_1=rustc_stage_1,
         rustc_stage_2=rustc_stage_2,
         test_run=test_run,
         test_build=test_build,
+        suites=suites,
         total=metrics.duration
     )
 
 
-if __name__ == "__main__":
-    data = defaultdict(list)
-    shas = get_shas_from_last_n_days(30)
-
+@app.command()
+def download_ci_durations(days: int = 30, output: Path = "result.csv"):
+    shas = get_shas_from_last_n_days(days)
+    items: List[Tuple[str, List[InvocationResult]]] = []
     with create_downloader() as downloader:
         for commit in tqdm.tqdm(shas):
             response = downloader.get_metrics_for_sha(commit, CI_JOBS)
@@ -300,13 +311,36 @@ if __name__ == "__main__":
                 metrics: List[BuildStep] = metrics
                 if len(metrics) > 0:
                     results = [aggregate_step(step) for step in metrics]
+                    items.append((job, results))
 
-                    data["job"].append(job)
-                    data["llvm"].append(sum(r.llvm for r in results))
-                    data["rustc-1"].append(sum(r.rustc_stage_1 for r in results))
-                    data["rustc-2"].append(sum(r.rustc_stage_2 for r in results))
-                    data["test-run"].append(sum(r.test_run for r in results))
-                    data["test-build"].append(sum(r.test_build for r in results))
-                    data["total"].append(sum(r.total for r in results))
+    known_suites = set()
+    for (_, results) in items:
+        for result in results:
+            known_suites |= set(result.suites.keys())
+
+    data = defaultdict(list)
+    for (job, results) in items:
+        data["job"].append(job)
+        data["llvm"].append(sum(r.llvm for r in results))
+        data["rustc-1"].append(sum(r.rustc_stage_1 for r in results))
+        data["rustc-2"].append(sum(r.rustc_stage_2 for r in results))
+        data["test-run"].append(sum(r.test_run for r in results))
+        data["test-build"].append(sum(r.test_build for r in results))
+        data["total"].append(sum(r.total for r in results))
+
+        # We need to make sure that all suites are added for each job, otherwise creation of the DataFarme below will
+        # fail.
+        added_suites = set()
+        for (suite, duration) in results[-1].suites.items():
+            data[f"suite-{suite}"].append(duration)
+            added_suites.add(suite)
+        for suite in known_suites:
+            if suite not in added_suites:
+                data[f"suite-{suite}"].append(0)
+
     df = pd.DataFrame(data)
-    df.to_csv("result.csv", index=False)
+    df.to_csv(output, index=False)
+
+
+if __name__ == "__main__":
+    app()
