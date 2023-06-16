@@ -2,9 +2,10 @@ import contextlib
 import json
 import multiprocessing
 import os
+import re
 from collections import defaultdict
 from pathlib import Path
-from typing import List, Iterator, Optional, Iterable, Dict
+from typing import List, Iterator, Optional, Iterable, Dict, Callable
 
 import pandas as pd
 import requests
@@ -85,24 +86,28 @@ PATH_TO_RUSTC = CURRENT_DIR.parent
 
 
 class BuildStep:
-    def __init__(self, type: str, children: List["BuildStep"], duration: float):
+    def __init__(self, type: str, children: List["BuildStep"], duration: float, stage: Optional[int] = None):
         self.type = type
         self.children = children
         self.duration = duration
+        self.stage = stage
 
-    def find_all_by_type(self, type: str) -> Iterator["BuildStep"]:
-        if self.type.startswith(type):
+    def find_all_by_filter(self, filter: Callable[["BuildStep"], bool]) -> Iterator["BuildStep"]:
+        if filter(self):
             yield self
             return
         for child in self.children:
-            yield from child.find_all_by_type(type)
+            yield from child.find_all_by_filter(filter)
 
-    def duration_by_type(self, type: str) -> float:
-        children = tuple(self.find_all_by_type(type))
+    def duration_by_filter(self, filter: Callable[["BuildStep"], bool]) -> float:
+        children = tuple(self.find_all_by_filter(filter))
         return sum(step.duration for step in children)
 
     def __repr__(self):
         return f"BuildStep(type={self.type}, duration={self.duration}, children={len(self.children)})"
+
+
+STAGE_REGEX = re.compile(r".*stage: (\d).*")
 
 
 def load_metrics(metrics) -> BuildStep:
@@ -116,12 +121,16 @@ def load_metrics(metrics) -> BuildStep:
         duration = entry.get("duration_excluding_children_sec", 0)
         children = []
 
+        stage = STAGE_REGEX.match(entry.get("debug_repr", ""))
+        if stage is not None:
+            stage = int(stage.group(1))
+
         for child in entry.get("children", ()):
             step = parse(child)
             if step is not None:
                 children.append(step)
                 duration += step.duration
-        return BuildStep(type=type, children=children, duration=duration)
+        return BuildStep(type=type, children=children, duration=duration, stage=stage)
 
     children = [parse(child) for child in invocation.get("children", ())]
     return BuildStep(
@@ -217,13 +226,15 @@ if __name__ == "__main__":
             response = downloader.get_metrics_for_sha(commit, CI_JOBS)
             for (job, metrics) in response.items():
                 metrics: BuildStep = metrics
-                llvm = metrics.duration_by_type("bootstrap::llvm::Llvm")
-                rustc = metrics.duration_by_type("bootstrap::compile::Rustc")
-                tests = metrics.duration_by_type("bootstrap::test::")
+                llvm = metrics.duration_by_filter(lambda step: step.type == "bootstrap::llvm::Llvm")
+                rustc_stage_1 = metrics.duration_by_filter(lambda step: step.type == "bootstrap::compile::Rustc" and step.stage == 0)
+                rustc_stage_2 = metrics.duration_by_filter(lambda step: step.type == "bootstrap::compile::Rustc" and step.stage == 1)
+                tests = metrics.duration_by_filter(lambda step: step.type.startswith("bootstrap::test::"))
                 total = metrics.duration
                 data["job"].append(job)
                 data["llvm"].append(llvm)
-                data["rustc"].append(rustc)
+                data["rustc-1"].append(rustc_stage_1)
+                data["rustc-2"].append(rustc_stage_2)
                 data["tests"].append(tests)
                 data["total"].append(total)
     df = pd.DataFrame(data)
