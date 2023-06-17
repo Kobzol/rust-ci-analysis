@@ -13,7 +13,8 @@ You can change the location by modifying the `PATH_TO_RUSTC` variable.
 - Download build metrics for last 14 days, and plot the results
     ```console
     $ python3 ci-analyze.py download-ci-durations 14
-    $ python3 ci-plot.py # Plot the results
+    $ python3 ci-plot.py build-durations                  # Plot total job durations
+    $ python3 ci-plot.py step-durations --mode bootstrap  # Plot individual bootstrap step durations
     ```
 - Analyze tests
     ```console

@@ -1,5 +1,6 @@
 import contextlib
 import dataclasses
+import datetime
 import json
 import multiprocessing
 import os
@@ -64,8 +65,10 @@ CI_JOBS = (
     "x86_64-apple-1",
     "x86_64-apple-2",
     "dist-aarch64-apple",
+    "x86_64-msvc",
     "x86_64-msvc-1",
     "x86_64-msvc-2",
+    "i686-msvc",
     "i686-msvc-1",
     "i686-msvc-2",
     "x86_64-msvc-cargo",
@@ -247,9 +250,15 @@ def create_downloader() -> Iterable[MetricDownloader]:
         yield MetricDownloader(pool)
 
 
-def get_shas_from_last_n_days(days: int) -> List[str]:
+@dataclasses.dataclass
+class Commit:
+    sha: str
+    date: datetime.datetime
+
+
+def get_commits_from_last_n_days(days: int) -> List[Commit]:
     """
-    Return rust-lang/rust merge commit SHAs for the last `days` days.
+    Return rust-lang/rust merge commits for the last `days` days.
     """
     from git import Repo
 
@@ -272,7 +281,7 @@ def get_shas_from_last_n_days(days: int) -> List[str]:
         previous_date = commits[-1].committed_datetime
         if commit_date.date() != previous_date.date():
             commits.append(commit)
-    return [commit.hexsha for commit in commits]
+    return [Commit(sha=commit.hexsha, date=commit.committed_datetime) for commit in commits]
 
 
 def calculate_test_duration(step: BuildStep) -> (float, float):
@@ -346,24 +355,25 @@ def download_ci_durations(days: int = 30, output: Path = "result.csv"):
     Downloads the metrics.json files from the last `days` of master merge commits.
     Analyzes the metrics and stores durations of interesting bootstrap steps into `output`.
     """
-    shas = get_shas_from_last_n_days(days)
-    items: List[Tuple[str, List[InvocationResult]]] = []
+    commits = get_commits_from_last_n_days(days)
+    items: List[Tuple[str, Commit, List[InvocationResult]]] = []
     with create_downloader() as downloader:
-        for commit in tqdm.tqdm(shas):
-            response = downloader.get_metrics_for_sha(commit, CI_JOBS, parse_tests=False)
+        for commit in tqdm.tqdm(commits):
+            response = downloader.get_metrics_for_sha(commit.sha, CI_JOBS, parse_tests=False)
             for (job, metrics) in response.items():
                 metrics: List[BuildStep] = metrics
                 if len(metrics) > 0:
                     results = [aggregate_step(step) for step in metrics]
-                    items.append((job, results))
+                    items.append((job, commit, results))
 
     known_suites = set()
-    for (_, results) in items:
+    for (_, _, results) in items:
         for result in results:
             known_suites |= set(result.suites.keys())
 
     data = defaultdict(list)
-    for (job, results) in items:
+    for (job, commit, results) in items:
+        data["timestamp"].append(int(commit.date.timestamp()))
         data["job"].append(job)
         data["llvm"].append(sum(r.llvm for r in results))
         data["rustc-1"].append(sum(r.rustc_stage_1 for r in results))
@@ -405,8 +415,8 @@ def analyze_tests(commit: Optional[str] = None):
     Prints results to output.
     """
     if commit is None:
-        commit = get_shas_from_last_n_days(1)[0]
-    tests = get_tests(commit)
+        commit = get_commits_from_last_n_days(1)[0]
+    tests = get_tests(commit.sha)
 
     # Test to count
     test_to_count = defaultdict(int)

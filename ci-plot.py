@@ -1,33 +1,66 @@
-import matplotlib.pyplot as plt
+from pathlib import Path
+from typing import Optional
+
 import pandas as pd
 import seaborn as sns
+import typer
+from matplotlib import pyplot as plt
 
-df = pd.read_csv("result.csv")
-# df = df[df["job"].isin((
-#     "x86_64-mingw-1", "x86_64-mingw-2",
-#     "i686-mingw-1", "i686-mingw-2",
-#     "x86_64-msvc-1", "x86_64-msvc-2",
-#     "i686-msvc-1", "i686-msvc-2",
-#     "x86_64-apple-1", "x86_64-apple-2",
-#     "dist-x86_64-linux"
-# ))]
-
-aggregated_cols = "llvm", "rustc-1", "rustc-2", "test-build", "test-run"
-
-# Bootstrap steps
-df = df[df.columns[df.columns.isin(["job", *aggregated_cols])]]
-
-# Test suites
-df = df[df.columns[~df.columns.isin(aggregated_cols)]]
+app = typer.Typer()
 
 
-def fn(data, **kwargs):
-    data = pd.melt(data, id_vars=["job"], var_name="section")
-    g = sns.barplot(data=data, x="section", y="value")
+@app.command()
+def build_durations(input: Path = "result.csv", jobs: Optional[str] = None):
+    """
+    Plots the total durations of CI build times over a time period.
+    """
+    df = pd.read_csv(input)
+    if jobs is not None:
+        df = df[df["job"].isin(jobs.split(","))]
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
+    g = sns.lineplot(data=df, x="timestamp", y="total", hue="job")
     g.set_xticklabels(g.get_xticklabels(), rotation=90)
+    g.set(ylim=(0, 8000))
+
+    plt.tight_layout()
+    plt.savefig("build-durations.png")
 
 
-grid = sns.FacetGrid(df, col="job", col_wrap=4, sharey=True)
-grid.map_dataframe(fn)
-# plt.show()
-plt.savefig("output.png")
+AGGREGATED_COLS = "llvm", "rustc-1", "rustc-2", "test-build", "test-run"
+
+
+@app.command()
+def step_durations(input: Path = "result.csv", mode="bootstrap", jobs: Optional[str] = None):
+    """
+    Plots durations of individual bootstrap steps.
+
+    @param mode: Either "bootstrap" (for displaying individual build stages) or "test" (for displaying test suite
+    durations).
+    """
+    df = pd.read_csv(input)
+    if jobs is not None:
+        df = df[df["job"].isin(jobs.split(","))]
+
+    if mode == "bootstrap":
+        df = df[df.columns[df.columns.isin(["job", *AGGREGATED_COLS])]]
+    elif mode == "test":
+        df = df[df.columns[~df.columns.isin(AGGREGATED_COLS)]].drop(columns=["timestamp", "total"])
+    else:
+        assert False
+
+    def fn(data, **kwargs):
+        data = pd.melt(data, id_vars=["job"], var_name="section")
+        g = sns.barplot(data=data, x="section", y="value")
+        g.set_xticklabels(g.get_xticklabels(), rotation=90)
+
+    if jobs is not None and len(jobs) == 1:
+        fn(df)
+    else:
+        grid = sns.FacetGrid(df, col="job", col_wrap=4, sharey=True)
+        grid.map_dataframe(fn)
+    plt.savefig("step-durations.png", dpi=300)
+
+
+if __name__ == "__main__":
+    app()
