@@ -1,5 +1,5 @@
 # Rust CI analysis
-Simple analysis scripts for Rust CI usage.
+Simple analysis scripts for [rust-lang/rust](https://github.com/rust-lang/rust) CI usage.
 
 ## Installation
 ```console
