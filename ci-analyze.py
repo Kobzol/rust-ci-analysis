@@ -6,6 +6,7 @@ import multiprocessing
 import os
 import re
 from collections import defaultdict
+from io import StringIO
 from pathlib import Path
 from typing import List, Iterator, Optional, Iterable, Dict, Callable, Tuple, Union
 
@@ -289,22 +290,23 @@ def calculate_test_duration(step: BuildStep) -> (float, float):
     Returns (test run duration, test build duration)
     """
     run_duration = step.duration
+    build_duration = 0
 
-    def iterate(step):
-        nonlocal run_duration
+    def iterate(item):
+        nonlocal run_duration, build_duration
 
-        for child in step.children:
-            # if child.type == "bootstrap::test::Compiletest":
-            #     run_duration -= child.duration_excluding_children
-            if "ToolBuild" in child.type or "TestHelpers" in child.type or "Std" in child.type:
+        for child in item.children:
+            if "ToolBuild" in child.type or "TestHelpers" in child.type:
+                run_duration -= child.duration
+                build_duration += child.duration
+            elif child.type in ("bootstrap::compile::Rustc", "bootstrap::compile::Assemble"):
                 run_duration -= child.duration
             else:
-                for c in child.iterate_all_children():
-                    iterate(c)
+                iterate(child)
 
     iterate(step)
 
-    return (run_duration, step.duration - run_duration)
+    return (run_duration, build_duration)
 
 
 @dataclasses.dataclass
@@ -326,6 +328,7 @@ def aggregate_step(metrics: BuildStep) -> InvocationResult:
         lambda step: step.type == "bootstrap::compile::Rustc" and step.stage == 1)
     test_steps = list(metrics.find_all_by_filter(lambda step: step.type.startswith("bootstrap::test::")))
     test_durations = [calculate_test_duration(step) for step in test_steps]
+
     test_run = sum(t[0] for t in test_durations)
     test_build = sum(t[1] for t in test_durations)
     test_total = sum(s.duration for s in test_steps)
@@ -347,6 +350,23 @@ def aggregate_step(metrics: BuildStep) -> InvocationResult:
         suites=suites,
         total=metrics.duration
     )
+
+
+def print_step_table(step: BuildStep):
+    substeps: List[Tuple[int, BuildStep]] = []
+
+    def visit(step: BuildStep, level: int):
+        substeps.append((level, step))
+        for child in step.children:
+            visit(child, level=level + 1)
+
+    visit(step, 0)
+
+    output = StringIO()
+    for (level, step) in substeps:
+        label = f"{'.' * level}{step.type}"
+        print(f"{label:<65}{step.duration:>8.2f}s", file=output)
+    print(f"Build step durations\n{output.getvalue()}")
 
 
 @app.command()
