@@ -370,16 +370,25 @@ def print_step_table(step: BuildStep):
 
 
 @app.command()
-def download_ci_durations(days: int = 30, output: Path = "result.csv"):
+def download_ci_durations(days: int = 30, commit: Optional[str] = None, jobs: Optional[str] = None, output: Path = "result.csv"):
     """
     Downloads the metrics.json files from the last `days` of master merge commits.
     Analyzes the metrics and stores durations of interesting bootstrap steps into `output`.
     """
-    commits = get_commits_from_last_n_days(days)
+    if commit is not None:
+        commits = [Commit(sha=commit, date=datetime.datetime.now())]
+    else:
+        commits = get_commits_from_last_n_days(days)
+
+    if jobs is None:
+        jobs = CI_JOBS
+    else:
+        jobs = jobs.split(",")
+
     items: List[Tuple[str, Commit, List[InvocationResult]]] = []
     with create_downloader() as downloader:
         for commit in tqdm.tqdm(commits):
-            response = downloader.get_metrics_for_sha(commit.sha, CI_JOBS, parse_tests=False)
+            response = downloader.get_metrics_for_sha(commit.sha, jobs, parse_tests=False)
             for (job, metrics) in response.items():
                 metrics: List[BuildStep] = metrics
                 if len(metrics) > 0:
