@@ -21,7 +21,7 @@ def build_durations(input: Path = "result.csv", jobs: Optional[str] = None):
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
     g = sns.lineplot(data=df, x="timestamp", y="total", hue="job")
     g.set_xticklabels(g.get_xticklabels(), rotation=90)
-    g.set(ylim=(0, 8000))
+    g.set(ylabel="Duration [s]", ylim=(0, 8000))
 
     plt.tight_layout()
     plt.savefig("build-durations.png")
