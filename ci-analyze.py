@@ -197,7 +197,8 @@ def load_metrics(metrics, parse_tests: bool = False) -> List[BuildStep]:
 
 
 def download_metrics(sha: str, job: str):
-    url = f"https://ci-artifacts.rust-lang.org/rustc-builds/{sha}/metrics-{job}.json"
+    suffix = "-alt" if job.endswith("-alt") else ""
+    url = f"https://ci-artifacts.rust-lang.org/rustc-builds{suffix}/{sha}/metrics-{job}.json"
     response = requests.get(url)
     response.raise_for_status()
     return response.json()
