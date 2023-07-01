@@ -440,6 +440,8 @@ def analyze_tests(commit: Optional[str] = None):
     """
     if commit is None:
         commit = get_commits_from_last_n_days(1)[0]
+    else:
+        commit = Commit(sha=commit, date=datetime.datetime.now())
     tests = get_tests(commit.sha)
 
     # Test to count
