@@ -1,6 +1,7 @@
 import contextlib
 import dataclasses
 import datetime
+import itertools
 import json
 import multiprocessing
 import os
@@ -101,7 +102,8 @@ class TestSuite:
 
 
 class BuildStep:
-    def __init__(self, type: str, children: List["BuildStep"], duration: float, duration_excluding_children: float,
+    def __init__(self, type: str, children: List["BuildStep"], duration: float,
+                 duration_excluding_children: float,
                  stage: Optional[int] = None, tests: Optional[List[Test]] = None):
         self.type = type
         self.children = children
@@ -153,7 +155,8 @@ def load_metrics(metrics, parse_tests: bool = False) -> List[BuildStep]:
                 return None
             elif parse_tests and entry["kind"] == "test_suite":
                 tests = entry["tests"]
-                tests = [Test(name=normalize_test_name(t["name"]), outcome=t["outcome"]) for t in tests]
+                tests = [Test(name=normalize_test_name(t["name"]), outcome=t["outcome"]) for t in
+                         tests]
                 return TestSuite(tests=tests)
             elif parse_tests and entry["kind"] == "test":
                 tests = [Test(name=normalize_test_name(entry["name"]), outcome=entry["outcome"])]
@@ -180,7 +183,8 @@ def load_metrics(metrics, parse_tests: bool = False) -> List[BuildStep]:
                         else:
                             assert False
                 return BuildStep(type=type, children=children, duration=duration,
-                                 duration_excluding_children=duration_excluding_children, stage=stage,
+                                 duration_excluding_children=duration_excluding_children,
+                                 stage=stage,
                                  tests=tests)
             return None
 
@@ -232,9 +236,11 @@ class MetricDownloader:
     def __init__(self, pool: multiprocessing.Pool):
         self.pool = pool
 
-    def get_metrics_for_sha(self, sha: str, jobs: Iterable[str], parse_tests: bool) -> Dict[str, BuildStep]:
+    def get_metrics_for_sha(self, sha: str, jobs: Iterable[str], parse_tests: bool) -> Dict[
+        str, BuildStep]:
         result = {}
-        for (job, metric) in zip(jobs, self.pool.starmap(get_metrics, list((sha, job, parse_tests) for job in jobs))):
+        for (job, metric) in zip(jobs, self.pool.starmap(get_metrics, list(
+            (sha, job, parse_tests) for job in jobs))):
             if metric is not None:
                 result[job] = metric
         return result
@@ -321,7 +327,8 @@ def aggregate_step(metrics: BuildStep) -> InvocationResult:
         lambda step: step.type == "bootstrap::compile::Rustc" and step.stage == 0)
     rustc_stage_2 = metrics.duration_by_filter(
         lambda step: step.type == "bootstrap::compile::Rustc" and step.stage == 1)
-    test_steps = list(metrics.find_all_by_filter(lambda step: step.type.startswith("bootstrap::test::")))
+    test_steps = list(
+        metrics.find_all_by_filter(lambda step: step.type.startswith("bootstrap::test::")))
     test_durations = [calculate_test_duration(step) for step in test_steps]
 
     test_run = sum(t[0] for t in test_durations)
@@ -364,16 +371,21 @@ def print_step_table(step: BuildStep):
     print(f"Build step durations\n{output.getvalue()}")
 
 
+def get_commits(days: int, commit: Optional[str] = None) -> List[Commit]:
+    if commit is not None:
+        return [Commit(sha=commit, date=datetime.datetime.now())]
+    else:
+        return get_commits_from_last_n_days(days)
+
+
 @app.command()
-def download_ci_durations(days: int = 30, commit: Optional[str] = None, jobs: Optional[str] = None, output: Path = "result.csv"):
+def download_ci_durations(days: int = 30, commit: Optional[str] = None, jobs: Optional[str] = None,
+                          output: Path = "result.csv"):
     """
     Downloads the metrics.json files from the last `days` of master merge commits.
     Analyzes the metrics and stores durations of interesting bootstrap steps into `output`.
     """
-    if commit is not None:
-        commits = [Commit(sha=commit, date=datetime.datetime.now())]
-    else:
-        commits = get_commits_from_last_n_days(days)
+    commits = get_commits(days, commit)
 
     if jobs is None:
         jobs = CI_JOBS
@@ -474,6 +486,35 @@ def analyze_tests(commit: Optional[str] = None):
         passed = outcomes.get("passed", 0)
         ignored = outcomes.get("ignored", 0)
         print(f"{job}: passed={passed}, ignored={ignored}")
+
+
+@app.command()
+def analyze_step(step: str, days: int = 30, commit: Optional[str] = None):
+    """
+    Analyze the duration of a specific bootstrap step over a period of N days or for a specific
+    commit.
+    """
+    commits = get_commits(days, commit)
+    by_commit = []
+    with create_downloader() as downloader:
+        for commit in tqdm.tqdm(commits):
+            response = downloader.get_metrics_for_sha(commit.sha, CI_JOBS, parse_tests=False)
+            in_commit = []
+            for (job, metrics) in response.items():
+                metrics: List[BuildStep] = metrics
+                filtered = list(itertools.chain.from_iterable(
+                    [m.find_all_by_filter(lambda s: s.type == step) for m in metrics]
+                ))
+                duration = sum(s.duration for s in filtered)
+                # Some jobs might not have executed the step at all
+                # Do not include them in the summary to avoid skewing the minimum and average values
+                if duration > 0:
+                    in_commit.append(duration)
+            summary = pd.Series(in_commit).describe()
+            min, max, mean = summary["min"], summary["max"], summary["mean"]
+            by_commit.append((commit, (min, max, mean)))
+    for (commit, (min, max, mean)) in by_commit:
+        print(f"{commit.date}: mean={mean:>8.2f}s (min={min:>8.2f}s, max={max:>8.2f}s)")
 
 
 if __name__ == "__main__":
