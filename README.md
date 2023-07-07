@@ -21,7 +21,8 @@ You can change the location by modifying the `PATH_TO_RUSTC` variable.
     $ python3 ci-analyze.py analyze-tests <commit>
     ```
     If you do not pass `<commit>`, the latest `rust-lang/rust` master merge commit will be used.
-- Analyze the duration of a specific step for a period of time or for a specific commit
+- Analyze the duration of all steps or a specific step of all CI jobs for a period of time or for
+  a specific commit
     ```console
-    $ python3 ci-analyze.py analyze-step bootstrap::test::RustAnalyzer --days 10
+    $ python3 ci-analyze.py analyze-duration [--days 10] [--step bootstrap::test::RustAnalyzer]
     ```

@@ -68,11 +68,20 @@ CI_JOBS = (
     "x86_64-apple-2",
     "dist-aarch64-apple",
     "x86_64-msvc",
+    "x86_64-msvc-1",
+    "x86_64-msvc-2",
     "i686-msvc",
+    "i686-msvc-1",
+    "i686-msvc-2",
     "x86_64-msvc-cargo",
     "x86_64-msvc-tools",
+    "x86_64-msvc-ext",
     "i686-mingw",
+    "i686-mingw-1",
+    "i686-mingw-2",
     "x86_64-mingw",
+    "x86_64-mingw-1",
+    "x86_64-mingw-2",
     "dist-x86_64-msvc",
     "dist-i686-msvc",
     "dist-aarch64-msvc",
@@ -489,10 +498,10 @@ def analyze_tests(commit: Optional[str] = None):
 
 
 @app.command()
-def analyze_step(step: str, days: int = 30, commit: Optional[str] = None):
+def analyze_duration(days: int = 30, commit: Optional[str] = None, step: Optional[str] = None):
     """
-    Analyze the duration of a specific bootstrap step over a period of N days or for a specific
-    commit.
+    Analyze the total duration of all CI jobs per commit.
+    If step is selected, only the specified step will be taken into account.
     """
     commits = get_commits(days, commit)
     by_commit = []
@@ -502,19 +511,22 @@ def analyze_step(step: str, days: int = 30, commit: Optional[str] = None):
             in_commit = []
             for (job, metrics) in response.items():
                 metrics: List[BuildStep] = metrics
-                filtered = list(itertools.chain.from_iterable(
-                    [m.find_all_by_filter(lambda s: s.type == step) for m in metrics]
-                ))
-                duration = sum(s.duration for s in filtered)
+                if step is not None:
+                    filtered = list(itertools.chain.from_iterable(
+                        [m.find_all_by_filter(lambda s: s.type == step) for m in metrics]
+                    ))
+                    duration = sum(s.duration for s in filtered)
+                else:
+                    duration = sum(m.duration for m in metrics)
                 # Some jobs might not have executed the step at all
                 # Do not include them in the summary to avoid skewing the minimum and average values
                 if duration > 0:
                     in_commit.append(duration)
             summary = pd.Series(in_commit).describe()
             min, max, mean = summary["min"], summary["max"], summary["mean"]
-            by_commit.append((commit, (min, max, mean)))
-    for (commit, (min, max, mean)) in by_commit:
-        print(f"{commit.date}: mean={mean:>8.2f}s (min={min:>8.2f}s, max={max:>8.2f}s)")
+            by_commit.append((commit, (sum(in_commit), min, max, mean)))
+    for (commit, (total, min, max, mean)) in by_commit:
+        print(f"{commit.date}: total={total:>8.2f}s (mean={mean:>8.2f}s, min={min:>8.2f}s, max={max:>8.2f}s)")
 
 
 if __name__ == "__main__":
