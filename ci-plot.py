@@ -53,6 +53,7 @@ def step_durations(input: Path = "result.csv", mode="bootstrap", jobs: Optional[
         data = pd.melt(data, id_vars=["job"], var_name="section")
         g = sns.barplot(data=data, x="section", y="value")
         g.set_xticklabels(g.get_xticklabels(), rotation=90)
+        g.set(ylabel="Duration [s]")
 
     if jobs is not None and len(jobs) == 1:
         fn(df)
