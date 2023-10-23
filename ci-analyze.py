@@ -309,7 +309,7 @@ def calculate_test_duration(step: BuildStep) -> (float, float):
             if "ToolBuild" in child.type or "TestHelpers" in child.type:
                 run_duration -= child.duration
                 build_duration += child.duration
-            elif child.type in ("bootstrap::compile::Rustc", "bootstrap::compile::Assemble"):
+            elif normalize_bootstrap_step(child.type) in ("compile::Rustc", "compile::Assemble"):
                 run_duration -= child.duration
             else:
                 iterate(child)
@@ -331,13 +331,13 @@ class InvocationResult:
 
 
 def aggregate_step(metrics: BuildStep) -> InvocationResult:
-    llvm = metrics.duration_by_filter(lambda step: step.type == "bootstrap::llvm::Llvm")
+    llvm = metrics.duration_by_filter(lambda step: normalize_bootstrap_step(step.type) == "llvm::Llvm")
     rustc_stage_1 = metrics.duration_by_filter(
-        lambda step: step.type == "bootstrap::compile::Rustc" and step.stage == 0)
+        lambda step: normalize_bootstrap_step(step.type) == "compile::Rustc" and step.stage == 0)
     rustc_stage_2 = metrics.duration_by_filter(
-        lambda step: step.type == "bootstrap::compile::Rustc" and step.stage == 1)
+        lambda step: normalize_bootstrap_step(step.type) == "compile::Rustc" and step.stage == 1)
     test_steps = list(
-        metrics.find_all_by_filter(lambda step: step.type.startswith("bootstrap::test::")))
+        metrics.find_all_by_filter(lambda step: normalize_bootstrap_step(step.type).startswith("test::")))
     test_durations = [calculate_test_duration(step) for step in test_steps]
 
     test_run = sum(t[0] for t in test_durations)
@@ -348,7 +348,7 @@ def aggregate_step(metrics: BuildStep) -> InvocationResult:
 
     suites = {}
     for test_step in test_steps:
-        suite_name = test_step.type[len("bootstrap::test::"):]
+        suite_name = normalize_bootstrap_step(test_step).type[len("test::"):]
         if test_step.duration > 10:
             suites[suite_name] = calculate_test_duration(test_step)[0]
 
