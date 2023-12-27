@@ -267,23 +267,24 @@ class Commit:
     date: datetime.datetime
 
 
+def iterate_merge_commits():
+    from git import Repo
+
+    repo = Repo(PATH_TO_RUSTC)
+    commit = repo.heads.master.commit
+    while True:
+        if commit.message.startswith("Auto merge"):
+            yield commit
+        for parent in commit.parents:
+            if parent.message.startswith("Auto merge") and commit.binsha != parent.binsha:
+                commit = parent
+                break
+
+
 def get_commits_from_last_n_days(days: int) -> List[Commit]:
     """
     Return rust-lang/rust merge commits for the last `days` days.
     """
-    from git import Repo
-
-    def iterate_merge_commits():
-        repo = Repo(PATH_TO_RUSTC)
-        commit = repo.heads.master.commit
-        while True:
-            if commit.message.startswith("Auto merge"):
-                yield commit
-            for parent in commit.parents:
-                if parent.message.startswith("Auto merge") and commit.binsha != parent.binsha:
-                    commit = parent
-                    break
-
     commit_iter = iterate_merge_commits()
     commits = [next(commit_iter)]
     while len(commits) < days:
@@ -293,6 +294,31 @@ def get_commits_from_last_n_days(days: int) -> List[Commit]:
         if commit_date.date() != previous_date.date():
             commits.append(commit)
     return [Commit(sha=commit.hexsha, date=commit.committed_datetime) for commit in commits]
+
+
+def get_commits_per_day(days: int) -> List[List[Commit]]:
+    def make_commit(commit) -> Commit:
+        return Commit(sha=commit.hexsha, date=commit.committed_datetime)
+
+    commit_iter = iterate_merge_commits()
+    commits_per_day = [[make_commit(next(commit_iter))]]
+    while len(commits_per_day) < days:
+        commit = make_commit(next(commit_iter))
+        commit_date = commit.date
+        previous_date = commits_per_day[-1][-1].date
+        if commit_date.date() == previous_date.date():
+            commits_per_day[-1].append(commit)
+        else:
+            commits_per_day.append([commit])
+    return commits_per_day
+
+
+def normalize_bootstrap_step(step: str) -> str:
+    prefixes = ("bootstrap::core::build_steps::", "bootstrap::")
+    for prefix in prefixes:
+        if step.startswith(prefix):
+            return step[len(prefix):]
+    return step
 
 
 def calculate_test_duration(step: BuildStep) -> (float, float):
@@ -527,6 +553,16 @@ def analyze_duration(days: int = 30, commit: Optional[str] = None, step: Optiona
             by_commit.append((commit, (sum(in_commit), min, max, mean)))
     for (commit, (total, min, max, mean)) in by_commit:
         print(f"{commit.date}: total={total:>8.2f}s (mean={mean:>8.2f}s, min={min:>8.2f}s, max={max:>8.2f}s)")
+
+
+@app.command()
+def analyze_commit_count(days: int = 60):
+    """
+    Analyzes the number of merge commits per day.
+    """
+    commits = get_commits_per_day(days)
+    for commits_in_day in commits:
+        print(f"{commits_in_day[0].date}: {len(commits_in_day)}")
 
 
 if __name__ == "__main__":
