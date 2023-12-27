@@ -1,12 +1,22 @@
 # Rust CI analysis
 Simple analysis scripts for [rust-lang/rust](https://github.com/rust-lang/rust) CI usage.
 
-## Installation
+## Rust crate
+The crate contains code for downloading workflow information from the GitHub API. It can download information about
+completed `auto/try/PR` workflows from `rust-lang/rust` and `rust-lang-ci/rust` and show estimated durations and costs
+(in USD) for individual jobs of each workflow.
+
+## Python scripts
+These scripts load commit information from a git checkout of `rust-lang/rust` and then downloads workflow metrics for
+these commits from S3. They can chart durations of individual jobs and also steps within a job (Rust build, LLVM build,
+test etc.).
+
+### Installation
 ```console
 $ python3 -m pip install -r requirements.txt
 ```
 
-## Usage
+### Usage
 The `ci-analyze.py` script assumes that a `rust` git checkout will be located in a directory one level above it.
 You can change the location by modifying the `PATH_TO_RUSTC` variable.
 
